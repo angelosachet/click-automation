@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pydantic
+pyautogui
+opencv-python
+pillow
