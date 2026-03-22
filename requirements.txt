@@ -4,3 +4,4 @@ pydantic
 pyautogui
 opencv-python
 pillow
+websockets
