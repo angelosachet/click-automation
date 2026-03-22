@@ -8,6 +8,116 @@ from pydantic import BaseModel
 import time
 import asyncio
 from typing import Optional
+import ctypes
+import mmap
+import websockets
+import json
+
+class SPageFileGraphics(ctypes.Structure):
+    _fields_ = [
+        ("packetId", ctypes.c_int),
+        ("status", ctypes.c_int),
+        ("session", ctypes.c_int),
+        ("currentTime", ctypes.c_wchar * 15),
+        ("lastTime", ctypes.c_wchar * 15),
+        ("bestTime", ctypes.c_wchar * 15),
+    ]
+
+class SPageFileStatic(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [
+        ("smVersion", ctypes.c_wchar * 15),
+        ("acVersion", ctypes.c_wchar * 15),
+        ("numberOfSessions", ctypes.c_int),
+        ("numCars", ctypes.c_int),  
+        ("carModel", ctypes.c_wchar * 33),
+    ]
+
+def open_shared_memory(name, size):
+    try:
+        return mmap.mmap(-1, size, name)
+    except Exception:
+        return None  # jogo provavelmente não está aberto
+
+graphics_map = open_shared_memory("acpmf_graphics", ctypes.sizeof(SPageFileGraphics))
+static_map = open_shared_memory("acpmf_static", ctypes.sizeof(SPageFileStatic))
+
+#True para usar dados mockados quando a memória compartilhada não estiver disponível
+#False para quando tiver o jogo rodando e quiser os dados reais
+USE_MOCK = False
+
+
+def get_race_info():
+    if USE_MOCK:
+        return {
+            "carro": "porsche_911_gt3",
+            "ultima_volta": "01:42:321",
+            "melhor_volta": "01:41:999",
+            "tempo_atual": "00:15:200"
+        }
+
+    if not graphics_map or not static_map:
+        return None
+
+    try:
+        graphics = SPageFileGraphics.from_buffer_copy(graphics_map)
+        static = SPageFileStatic.from_buffer_copy(static_map)
+
+        return {
+            "carro": static.carModel.strip(),
+            "ultima_volta": graphics.lastTime.strip(),
+            "melhor_volta": graphics.bestTime.strip(),
+            "tempo_atual": graphics.currentTime.strip()
+        }
+    except Exception:
+        return None
+    
+def convert_time_to_ms(time_str):
+    try:
+        if not time_str or time_str == "":
+            return 0
+
+        parts = time_str.split(":")
+        minutes = int(parts[0])
+        seconds = int(parts[1])
+        millis = int(parts[2])
+
+        return (minutes * 60 * 1000) + (seconds * 1000) + millis
+    except:
+        return 0
+
+WS_URL = "ws://181.214.95.75:7080/input"
+
+async def send_to_websocket():
+    while True:
+        data = get_race_info()
+
+        if data:
+            payload = {
+                "type": "simulator-update",
+                "data": {
+                    "simNum": 1,
+                    "pilot-name": "Player",
+                    "car": data["carro"],
+                    "track": "Unknown",  
+                    "lapData": {
+                        "lapTime": convert_time_to_ms(data["ultima_volta"]),
+                        "isValid": True
+                    },
+                    "bestLap": convert_time_to_ms(data["melhor_volta"])
+                }
+            }
+
+            try:
+                async with websockets.connect(WS_URL) as websocket:
+                    await websocket.send(json.dumps(payload))
+                    print("Enviado:", payload)
+
+            except Exception as e:
+                print("Erro ao enviar websocket:", e)
+
+        await asyncio.sleep(1)  # envia a cada 1 segundo
+
 
 app = FastAPI(title="API de Automação", version="1.0.0")
 
@@ -165,6 +275,32 @@ async def root():
     }
 
 
+@app.get("/race-info")
+async def race_info():
+    """
+    Retorna informações da corrida do Assetto Corsa
+    """
+    data = get_race_info()
+
+    if data is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Assetto Corsa não está rodando ou memória indisponível"
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "piloto": "Player",  # não vem da shared memory
+            **data
+        }
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(send_to_websocket())
+
     uvicorn.run(app, host="0.0.0.0", port=5001)
